@@ -48,15 +48,24 @@ ESP8266WebServer server(80);
 
 // Data Variables
 struct PatientData {
+  // Personal Information
   String name = "";
   int age = 0;
   String sex = "";
+  String bloodGroup = "";
+  int height = 0;      // in cm
+  float weight = 0.0;  // in kg
   String diseases = "";
+  
+  // Vital Signs
   float ecgValue = 0.0;
   int heartRate = 0;
   float spo2 = 0.0;
   float temperature = 0.0;
   int hrv = 0;
+  
+  // Calculated Metrics
+  float bmi = 0.0;
 };
 
 PatientData patient;
@@ -95,7 +104,7 @@ void setup() {
   // Initialize web server routes
   setupWebServer();
   
-  Serial.println("Health Monitoring System Ready!");
+  Serial.println("Enhanced Health Monitoring System Ready!");
 }
 
 void loop() {
@@ -109,6 +118,7 @@ void loop() {
       isScanning = false;
       calculateAverages();
       calculateHRV();
+      calculateBMI();
       Serial.println("Scan completed!");
     }
   }
@@ -176,6 +186,7 @@ void setupWebServer() {
   server.on("/start", HTTP_POST, handleStartScan);
   server.on("/upload", HTTP_POST, handleUploadData);
   server.on("/data", HTTP_GET, handleGetData);
+  server.on("/patient", HTTP_GET, handleGetPatientData);
   
   server.begin();
   Serial.println("HTTP server started");
@@ -191,9 +202,12 @@ void handleStartScan() {
   patient.name = server.arg("name");
   patient.age = server.arg("age").toInt();
   patient.sex = server.arg("sex");
+  patient.bloodGroup = server.arg("bloodGroup");
+  patient.height = server.arg("height").toInt();
+  patient.weight = server.arg("weight").toFloat();
   patient.diseases = server.arg("diseases");
   
-  // Reset data
+  // Reset sensor data
   resetSensorData();
   
   // Start scanning
@@ -220,7 +234,25 @@ void handleGetData() {
   jsonDoc["spo2"] = patient.spo2;
   jsonDoc["temp"] = patient.temperature;
   jsonDoc["hrv"] = patient.hrv;
+  jsonDoc["bmi"] = patient.bmi;
   jsonDoc["scanning"] = isScanning;
+  
+  String jsonString;
+  serializeJson(jsonDoc, jsonString);
+  
+  server.send(200, "application/json", jsonString);
+}
+
+void handleGetPatientData() {
+  StaticJsonDocument<1024> jsonDoc;
+  jsonDoc["name"] = patient.name;
+  jsonDoc["age"] = patient.age;
+  jsonDoc["sex"] = patient.sex;
+  jsonDoc["bloodGroup"] = patient.bloodGroup;
+  jsonDoc["height"] = patient.height;
+  jsonDoc["weight"] = patient.weight;
+  jsonDoc["diseases"] = patient.diseases;
+  jsonDoc["bmi"] = patient.bmi;
   
   String jsonString;
   serializeJson(jsonDoc, jsonString);
@@ -298,12 +330,28 @@ void calculateHRV() {
   Serial.println("HRV: " + String(patient.hrv));
 }
 
+void calculateBMI() {
+  if (patient.height > 0 && patient.weight > 0) {
+    float heightInMeters = patient.height / 100.0;
+    patient.bmi = patient.weight / (heightInMeters * heightInMeters);
+    Serial.println("BMI calculated: " + String(patient.bmi));
+  }
+}
+
+String getBMICategory(float bmi) {
+  if (bmi < 18.5) return "Underweight";
+  else if (bmi < 25) return "Normal";
+  else if (bmi < 30) return "Overweight";
+  else return "Obese";
+}
+
 void resetSensorData() {
   patient.ecgValue = 0.0;
   patient.heartRate = 0;
   patient.spo2 = 0.0;
   patient.temperature = 0.0;
   patient.hrv = 0;
+  patient.bmi = 0.0;
   ecgSampleIndex = 0;
   rrIndex = 0;
   lastBeatTime = 0;
@@ -326,7 +374,8 @@ bool sendToThingSpeak() {
                        "&field2=" + String(patient.heartRate) +
                        "&field3=" + String(patient.spo2) +
                        "&field4=" + String(patient.temperature) +
-                       "&field5=" + String(patient.hrv);
+                       "&field5=" + String(patient.hrv) +
+                       "&field6=" + String(patient.bmi);
       
       client.println("POST /update HTTP/1.1");
       client.println("Host: " + String(thingspeakServer));
@@ -352,16 +401,20 @@ bool sendToMySQLDirect() {
     // Create INSERT query
     char query[512];
     sprintf(query, 
-      "INSERT INTO patient_data (name, age, sex, diseases, ecg_value, heart_rate, spo2, temperature, hrv, created_at) VALUES ('%s', %d, '%s', '%s', %.2f, %d, %.2f, %.2f, %d, NOW())",
+      "INSERT INTO patient_data (name, age, sex, blood_group, height, weight, diseases, ecg_value, heart_rate, spo2, temperature, hrv, bmi, created_at) VALUES ('%s', %d, '%s', '%s', %d, %.2f, '%s', %.2f, %d, %.2f, %.2f, %d, %.2f, NOW())",
       patient.name.c_str(),
       patient.age,
       patient.sex.c_str(),
+      patient.bloodGroup.c_str(),
+      patient.height,
+      patient.weight,
       patient.diseases.c_str(),
       patient.ecgValue,
       patient.heartRate,
       patient.spo2,
       patient.temperature,
-      patient.hrv
+      patient.hrv,
+      patient.bmi
     );
     
     MySQL_Cursor *cur_mem = new MySQL_Cursor(&conn);
@@ -384,173 +437,297 @@ String createWebPage() {
   <!DOCTYPE html>
   <html>
   <head>
-      <title>IoT Health Monitor</title>
+      <title>Enhanced IoT Health Monitor</title>
       <meta name="viewport" content="width=device-width, initial-scale=1">
       <style>
           body {
-              font-family: Arial, sans-serif;
-              max-width: 600px;
+              font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+              max-width: 800px;
               margin: 0 auto;
               padding: 20px;
-              background-color: #f5f5f5;
+              background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+              min-height: 100vh;
           }
           .container {
               background: white;
-              padding: 20px;
-              border-radius: 10px;
-              box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+              padding: 30px;
+              border-radius: 15px;
+              box-shadow: 0 10px 30px rgba(0,0,0,0.2);
           }
           .header {
               text-align: center;
               color: #2c3e50;
-              margin-bottom: 20px;
+              margin-bottom: 30px;
+              border-bottom: 2px solid #3498db;
+              padding-bottom: 15px;
           }
           .form-group {
-              margin-bottom: 15px;
+              margin-bottom: 20px;
           }
           label {
               display: block;
-              margin-bottom: 5px;
-              font-weight: bold;
+              margin-bottom: 8px;
+              font-weight: 600;
+              color: #34495e;
           }
           input, select {
               width: 100%;
-              padding: 8px;
-              border: 1px solid #ddd;
-              border-radius: 4px;
+              padding: 12px;
+              border: 2px solid #bdc3c7;
+              border-radius: 8px;
               box-sizing: border-box;
+              font-size: 16px;
+              transition: border-color 0.3s;
+          }
+          input:focus, select:focus {
+              border-color: #3498db;
+              outline: none;
+          }
+          .form-row {
+              display: flex;
+              gap: 15px;
+              margin-bottom: 15px;
+          }
+          .form-col {
+              flex: 1;
           }
           .button-group {
               display: flex;
-              gap: 10px;
-              margin: 20px 0;
+              gap: 15px;
+              margin: 30px 0;
           }
           button {
               flex: 1;
-              padding: 12px;
+              padding: 15px;
               border: none;
-              border-radius: 5px;
+              border-radius: 8px;
               cursor: pointer;
               font-size: 16px;
               font-weight: bold;
+              transition: all 0.3s;
           }
           .scan-btn {
-              background-color: #3498db;
+              background: linear-gradient(135deg, #3498db, #2980b9);
               color: white;
+          }
+          .scan-btn:hover {
+              background: linear-gradient(135deg, #2980b9, #21618c);
+              transform: translateY(-2px);
           }
           .upload-btn {
-              background-color: #27ae60;
+              background: linear-gradient(135deg, #27ae60, #219a52);
               color: white;
           }
+          .upload-btn:hover {
+              background: linear-gradient(135deg, #219a52, #1e8449);
+              transform: translateY(-2px);
+          }
           .data-display {
-              background-color: #ecf0f1;
-              padding: 15px;
-              border-radius: 5px;
-              margin-top: 20px;
+              background: linear-gradient(135deg, #ecf0f1, #bdc3c7);
+              padding: 25px;
+              border-radius: 10px;
+              margin-top: 25px;
           }
           .data-row {
               display: flex;
               justify-content: space-between;
-              margin-bottom: 10px;
+              margin-bottom: 12px;
+              padding: 10px;
+              background: white;
+              border-radius: 6px;
+              box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+          }
+          .data-label {
+              font-weight: 600;
+              color: #2c3e50;
           }
           .data-value {
               font-weight: bold;
-              color: #2c3e50;
+              color: #e74c3c;
           }
+          .data-normal { color: #27ae60; }
+          .data-warning { color: #f39c12; }
+          .data-critical { color: #e74c3c; }
           .status {
               text-align: center;
-              padding: 10px;
-              margin: 10px 0;
-              border-radius: 5px;
+              padding: 15px;
+              margin: 20px 0;
+              border-radius: 8px;
+              font-weight: bold;
           }
           .scanning {
-              background-color: #fff3cd;
+              background: linear-gradient(135deg, #fff3cd, #ffeaa7);
               color: #856404;
+              border: 2px solid #ffeaa7;
           }
           .ready {
-              background-color: #d1ecf1;
+              background: linear-gradient(135deg, #d1ecf1, #a2d9ce);
               color: #0c5460;
+              border: 2px solid #a2d9ce;
           }
           .chart-container {
-              margin: 20px 0;
+              margin: 25px 0;
               height: 200px;
               background: #f8f9fa;
-              border: 1px solid #dee2e6;
-              border-radius: 5px;
+              border: 2px solid #dee2e6;
+              border-radius: 10px;
               position: relative;
           }
-          .ecg-wave {
-              width: 100%;
-              height: 100%;
+          .section-title {
+              color: #2c3e50;
+              border-left: 4px solid #3498db;
+              padding-left: 15px;
+              margin: 25px 0 15px 0;
           }
+          .patient-info {
+              background: #f8f9fa;
+              padding: 20px;
+              border-radius: 10px;
+              margin-bottom: 20px;
+          }
+          .bmi-indicator {
+              display: inline-block;
+              padding: 4px 12px;
+              border-radius: 20px;
+              font-size: 12px;
+              font-weight: bold;
+              margin-left: 10px;
+          }
+          .bmi-underweight { background: #3498db; color: white; }
+          .bmi-normal { background: #27ae60; color: white; }
+          .bmi-overweight { background: #f39c12; color: white; }
+          .bmi-obese { background: #e74c3c; color: white; }
       </style>
   </head>
   <body>
       <div class="container">
           <div class="header">
-              <h1>🩺 IoT Health Monitor</h1>
+              <h1>🏥 Enhanced IoT Health Monitor</h1>
+              <p>Complete Patient Health Assessment System</p>
           </div>
           
-          <form id="patientForm">
-              <div class="form-group">
-                  <label for="name">Name:</label>
-                  <input type="text" id="name" name="name" required>
-              </div>
-              
-              <div style="display: flex; gap: 10px;">
-                  <div class="form-group" style="flex: 1;">
-                      <label for="age">Age:</label>
-                      <input type="number" id="age" name="age" min="1" max="120" required>
+          <div class="patient-info">
+              <h3 class="section-title">Patient Demographics</h3>
+              <form id="patientForm">
+                  <div class="form-row">
+                      <div class="form-col">
+                          <label for="name">Full Name:</label>
+                          <input type="text" id="name" name="name" placeholder="Enter patient name" required>
+                      </div>
+                      <div class="form-col">
+                          <label for="age">Age:</label>
+                          <input type="number" id="age" name="age" min="1" max="120" placeholder="Years" required>
+                      </div>
                   </div>
                   
-                  <div class="form-group" style="flex: 1;">
-                      <label for="sex">Sex:</label>
-                      <select id="sex" name="sex" required>
-                          <option value="">Select</option>
-                          <option value="M">Male</option>
-                          <option value="F">Female</option>
-                          <option value="O">Other</option>
-                      </select>
+                  <div class="form-row">
+                      <div class="form-col">
+                          <label for="sex">Sex:</label>
+                          <select id="sex" name="sex" required>
+                              <option value="">Select Gender</option>
+                              <option value="M">Male</option>
+                              <option value="F">Female</option>
+                              <option value="O">Other</option>
+                          </select>
+                      </div>
+                      <div class="form-col">
+                          <label for="bloodGroup">Blood Group:</label>
+                          <select id="bloodGroup" name="bloodGroup" required>
+                              <option value="">Select Blood Group</option>
+                              <option value="A+">A+</option>
+                              <option value="A-">A-</option>
+                              <option value="B+">B+</option>
+                              <option value="B-">B-</option>
+                              <option value="AB+">AB+</option>
+                              <option value="AB-">AB-</option>
+                              <option value="O+">O+</option>
+                              <option value="O-">O-</option>
+                          </select>
+                      </div>
                   </div>
-              </div>
-              
-              <div class="form-group">
-                  <label for="diseases">Known Diseases:</label>
-                  <input type="text" id="diseases" name="diseases" placeholder="Hypertension, Diabetes, etc.">
-              </div>
-          </form>
-          
-          <div class="button-group">
-              <button class="scan-btn" onclick="startScan()">Start Scan</button>
-              <button class="upload-btn" onclick="uploadData()">Upload Data</button>
+                  
+                  <div class="form-row">
+                      <div class="form-col">
+                          <label for="height">Height (cm):</label>
+                          <input type="number" id="height" name="height" min="50" max="250" placeholder="Centimeters" required>
+                      </div>
+                      <div class="form-col">
+                          <label for="weight">Weight (kg):</label>
+                          <input type="number" id="weight" name="weight" min="2" max="300" step="0.1" placeholder="Kilograms" required>
+                      </div>
+                  </div>
+                  
+                  <div class="form-group">
+                      <label for="diseases">Known Diseases/Conditions:</label>
+                      <input type="text" id="diseases" name="diseases" placeholder="Hypertension, Diabetes, Asthma, etc.">
+                  </div>
+              </form>
           </div>
           
-          <div id="status" class="status ready">Ready to scan</div>
+          <div class="button-group">
+              <button class="scan-btn" onclick="startScan()">🩺 Start Health Scan</button>
+              <button class="upload-btn" onclick="uploadData()">📊 Upload Patient Data</button>
+          </div>
+          
+          <div id="status" class="status ready">System Ready - Enter patient details to begin</div>
           
           <div class="chart-container">
               <canvas id="ecgChart" class="ecg-wave"></canvas>
           </div>
           
+          <h3 class="section-title">Vital Signs & Health Metrics</h3>
           <div class="data-display">
               <div class="data-row">
-                  <span>ECG Value:</span>
-                  <span id="ecgValue" class="data-value">--</span>
+                  <span class="data-label">ECG Value:</span>
+                  <span id="ecgValue" class="data-value">-- mV</span>
               </div>
               <div class="data-row">
-                  <span>Heart Rate:</span>
+                  <span class="data-label">Heart Rate:</span>
                   <span id="hrValue" class="data-value">-- bpm</span>
               </div>
               <div class="data-row">
-                  <span>SpO2:</span>
+                  <span class="data-label">SpO2 Level:</span>
                   <span id="spo2Value" class="data-value">-- %</span>
               </div>
               <div class="data-row">
-                  <span>Temperature:</span>
+                  <span class="data-label">Body Temperature:</span>
                   <span id="tempValue" class="data-value">-- °C</span>
               </div>
               <div class="data-row">
-                  <span>HRV:</span>
+                  <span class="data-label">Heart Rate Variability:</span>
                   <span id="hrvValue" class="data-value">-- ms</span>
+              </div>
+              <div class="data-row">
+                  <span class="data-label">BMI (Body Mass Index):</span>
+                  <span id="bmiValue" class="data-value">-- 
+                      <span id="bmiCategory" class="bmi-indicator"></span>
+                  </span>
+              </div>
+          </div>
+          
+          <div id="patientSummary" style="margin-top: 20px; display: none;">
+              <h3 class="section-title">Patient Summary</h3>
+              <div class="data-display">
+                  <div class="data-row">
+                      <span class="data-label">Name:</span>
+                      <span id="summaryName" class="data-value">--</span>
+                  </div>
+                  <div class="data-row">
+                      <span class="data-label">Age/Sex:</span>
+                      <span id="summaryAgeSex" class="data-value">--</span>
+                  </div>
+                  <div class="data-row">
+                      <span class="data-label">Blood Group:</span>
+                      <span id="summaryBloodGroup" class="data-value">--</span>
+                  </div>
+                  <div class="data-row">
+                      <span class="data-label">Height/Weight:</span>
+                      <span id="summaryHeightWeight" class="data-value">--</span>
+                  </div>
+                  <div class="data-row">
+                      <span class="data-label">Medical Conditions:</span>
+                      <span id="summaryDiseases" class="data-value">--</span>
+                  </div>
               </div>
           </div>
       </div>
@@ -567,7 +744,7 @@ String createWebPage() {
               ecgChart = new Chart(ctx, {
                   type: 'line',
                   data: {
-                      labels: Array.from({length: 50}, (_, i) => i),
+                      labels: Array.from({length: 50}, (_, i) => ''),
                       datasets: [{
                           label: 'ECG Waveform',
                           data: ecgData,
@@ -575,7 +752,8 @@ String createWebPage() {
                           backgroundColor: 'rgba(231, 76, 60, 0.1)',
                           borderWidth: 2,
                           pointRadius: 0,
-                          tension: 0.4
+                          tension: 0.4,
+                          fill: true
                       }]
                   },
                   options: {
@@ -588,33 +766,56 @@ String createWebPage() {
                               title: {
                                   display: true,
                                   text: 'Voltage (V)'
+                              },
+                              grid: {
+                                  color: 'rgba(0,0,0,0.1)'
                               }
                           },
                           x: {
                               title: {
                                   display: true,
                                   text: 'Time'
+                              },
+                              grid: {
+                                  color: 'rgba(0,0,0,0.1)'
                               }
                           }
                       },
-                      animation: false
+                      animation: false,
+                      plugins: {
+                          legend: {
+                              display: true,
+                              position: 'top'
+                          }
+                      }
                   }
               });
+          }
+          
+          function getBMICategory(bmi) {
+              if (bmi < 18.5) return ['Underweight', 'bmi-underweight'];
+              else if (bmi < 25) return ['Normal', 'bmi-normal'];
+              else if (bmi < 30) return ['Overweight', 'bmi-overweight'];
+              else return ['Obese', 'bmi-obese'];
           }
           
           function startScan() {
               const form = document.getElementById('patientForm');
               if (!form.checkValidity()) {
-                  alert('Please fill all required fields');
+                  alert('Please fill all required patient details');
                   return;
               }
               
               const formData = new FormData(form);
               document.getElementById('status').className = 'status scanning';
-              document.getElementById('status').textContent = 'Scanning... (20 seconds)';
+              document.getElementById('status').textContent = 'Scanning vital signs... (20 seconds)';
+              
+              // Show patient summary
+              updatePatientSummary();
+              document.getElementById('patientSummary').style.display = 'block';
               
               // Reset ECG data
-              ecgData = Array(50).fill(0);
+              ecgData = Array(50).fill(1.0);
               if (ecgChart) {
                   ecgChart.data.datasets[0].data = ecgData;
                   ecgChart.update();
@@ -632,10 +833,25 @@ String createWebPage() {
                       setTimeout(() => {
                           stopDataUpdate();
                           document.getElementById('status').className = 'status ready';
-                          document.getElementById('status').textContent = 'Scan completed! Ready to upload.';
+                          document.getElementById('status').textContent = 'Scan completed! Ready to upload data.';
                       }, 20000);
                   }
               });
+          }
+          
+          function updatePatientSummary() {
+              const form = document.getElementById('patientForm');
+              const formData = new FormData(form);
+              
+              document.getElementById('summaryName').textContent = formData.get('name');
+              document.getElementById('summaryAgeSex').textContent = 
+                  formData.get('age') + ' years, ' + 
+                  (formData.get('sex') === 'M' ? 'Male' : formData.get('sex') === 'F' ? 'Female' : 'Other');
+              document.getElementById('summaryBloodGroup').textContent = formData.get('bloodGroup');
+              document.getElementById('summaryHeightWeight').textContent = 
+                  formData.get('height') + ' cm, ' + formData.get('weight') + ' kg';
+              document.getElementById('summaryDiseases').textContent = 
+                  formData.get('diseases') || 'None reported';
           }
           
           function startDataUpdate() {
@@ -650,35 +866,48 @@ String createWebPage() {
               fetch('/data')
                   .then(response => response.json())
                   .then(data => {
-                      // Update values
-                      document.getElementById('ecgValue').textContent = data.ecg.toFixed(2);
+                      // Update vital signs
+                      document.getElementById('ecgValue').textContent = data.ecg.toFixed(2) + ' mV';
                       document.getElementById('hrValue').textContent = data.hr + ' bpm';
                       document.getElementById('spo2Value').textContent = data.spo2.toFixed(1) + ' %';
                       document.getElementById('tempValue').textContent = data.temp.toFixed(1) + ' °C';
                       document.getElementById('hrvValue').textContent = data.hrv + ' ms';
                       
-                      // Simulate ECG waveform update
+                      // Update BMI with category
+                      if (data.bmi > 0) {
+                          const [category, cssClass] = getBMICategory(data.bmi);
+                          document.getElementById('bmiValue').textContent = data.bmi.toFixed(1);
+                          const bmiCategory = document.getElementById('bmiCategory');
+                          bmiCategory.textContent = category;
+                          bmiCategory.className = 'bmi-indicator ' + cssClass;
+                      }
+                      
+                      // Simulate ECG waveform update during scanning
                       if (data.scanning && ecgChart) {
-                          // Add new data point and remove oldest
-                          ecgData.push(Math.random() * 2 + 0.5); // Simulated ECG data
-                          ecgData.shift();
+                          // Simulate realistic ECG waveform
+                          for (let i = 0; i < ecgData.length; i++) {
+                              ecgData[i] = 1.0 + 0.5 * Math.sin(i * 0.5) + 0.2 * Math.random();
+                          }
                           ecgChart.data.datasets[0].data = ecgData;
                           ecgChart.update();
                       }
+                  })
+                  .catch(error => {
+                      console.error('Error fetching data:', error);
                   });
           }
           
           function uploadData() {
-              document.getElementById('status').textContent = 'Uploading data...';
+              document.getElementById('status').textContent = 'Uploading patient data to cloud...';
               
               fetch('/upload', {
                   method: 'POST'
               }).then(response => {
                   if (response.ok) {
                       document.getElementById('status').className = 'status ready';
-                      document.getElementById('status').textContent = 'Data uploaded successfully!';
+                      document.getElementById('status').textContent = 'Patient data uploaded successfully!';
                   } else {
-                      document.getElementById('status').textContent = 'Upload failed!';
+                      document.getElementById('status').textContent = 'Upload failed! Please try again.';
                   }
               });
           }
@@ -719,27 +948,77 @@ CREATE USER 'arduino_user'@'%' IDENTIFIED BY 'arduino_password';
 GRANT ALL PRIVILEGES ON health_monitor.* TO 'arduino_user'@'%';
 FLUSH PRIVILEGES;
 
+-- Enhanced patient_data table with new fields
 USE health_monitor;
 
--- Create patient_data table
+-- Drop existing table if needed
+-- DROP TABLE IF EXISTS patient_data;
+
 CREATE TABLE patient_data (
     id INT AUTO_INCREMENT PRIMARY KEY,
+    
+    -- Personal Information
     name VARCHAR(100) NOT NULL,
-    age INT NOT NULL,
+    age INT NOT NULL CHECK (age BETWEEN 1 AND 120),
     sex ENUM('M', 'F', 'O') NOT NULL,
+    blood_group ENUM('A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-') NOT NULL,
+    height INT NOT NULL CHECK (height BETWEEN 50 AND 250),  -- in cm
+    weight DECIMAL(5,2) NOT NULL CHECK (weight BETWEEN 2 AND 300),  -- in kg
     diseases TEXT,
-    ecg_value DECIMAL(5,2),
-    heart_rate INT,
-    spo2 DECIMAL(5,2),
-    temperature DECIMAL(4,2),
-    hrv INT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
+    
+    -- Vital Signs (from sensors)
+    ecg_value DECIMAL(5,2) CHECK (ecg_value BETWEEN 0 AND 5),
+    heart_rate INT CHECK (heart_rate BETWEEN 30 AND 250),
+    spo2 DECIMAL(5,2) CHECK (spo2 BETWEEN 70 AND 100),
+    temperature DECIMAL(4,2) CHECK (temperature BETWEEN 25 AND 45),
+    hrv INT CHECK (hrv BETWEEN 0 AND 200),
+    
+    -- Calculated Metrics
+    bmi DECIMAL(4,2) CHECK (bmi BETWEEN 10 AND 60),
+    
+    -- Timestamp
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    
+    -- Indexes for better performance
+    INDEX idx_created_at (created_at),
+    INDEX idx_patient_name (name),
+    INDEX idx_vital_signs (heart_rate, spo2, temperature),
+    INDEX idx_demographics (age, sex, blood_group),
+    INDEX idx_bmi (bmi)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- Create indexes for better performance
-CREATE INDEX idx_created_at ON patient_data(created_at);
-CREATE INDEX idx_name ON patient_data(name);
-CREATE INDEX idx_heart_rate ON patient_data(heart_rate);
+-- Optional: Create a view for BMI analysis
+CREATE VIEW patient_bmi_analysis AS
+SELECT 
+    name,
+    age,
+    sex,
+    height,
+    weight,
+    bmi,
+    CASE 
+        WHEN bmi < 18.5 THEN 'Underweight'
+        WHEN bmi < 25 THEN 'Normal'
+        WHEN bmi < 30 THEN 'Overweight'
+        ELSE 'Obese'
+    END as bmi_category,
+    created_at
+FROM patient_data 
+WHERE bmi IS NOT NULL;
+
+-- Optional: Create a view for critical patients
+CREATE VIEW critical_patients AS
+SELECT 
+    name,
+    age,
+    heart_rate,
+    spo2,
+    temperature,
+    created_at
+FROM patient_data 
+WHERE heart_rate < 50 OR heart_rate > 120 
+   OR spo2 < 90 
+   OR temperature < 35 OR temperature > 39;
 ```
 
 ### MySQL Server Configuration
@@ -851,5 +1130,28 @@ pox.setIRLedCurrent(MAX30100_LED_CURR_7_6MA);
 4. **Web Server Not Accessible**
    - Check IP address in serial monitor
    - Ensure client is on same network
+  
+## New Features Added 
+1. Enhanced Patient Demographics
+Blood Group: A+, A-, B+, B-, AB+, AB-, O+, O-
+Height: In centimeters (50-250 cm range)
+Weight: In kilograms (2-300 kg range)
+
+2. BMI Calculation
+Automatically calculates Body Mass Index:
+
+```cpp
+void calculateBMI() {
+  if (patient.height > 0 && patient.weight > 0) {
+    float heightInMeters = patient.height / 100.0;
+    patient.bmi = patient.weight / (heightInMeters * heightInMeters);
+  }
+}
+```
+3. BMI Categorization
+Underweight: BMI < 18.5
+Normal: BMI 18.5 - 24.9
+Overweight: BMI 25 -
 
 This complete solution provides a robust health monitoring system with direct database integration and real-time web interface!
+
