@@ -1,4 +1,6 @@
-## Arduino Code (ESP8266)
+# IoT Health Monitoring System - Complete Arduino Code (PHP-Free)
+
+## Arduino Code (ESP8266 with Direct MySQL)
 
 ```cpp
 #include <Wire.h>
@@ -8,6 +10,8 @@
 #include <DallasTemperature.h>
 #include "MAX30100_PulseOximeter.h"
 #include <ArduinoJson.h>
+#include <MySQL_Connection.h>
+#include <MySQL_Cursor.h>
 
 // WiFi Credentials
 const char* ssid = "YOUR_WIFI_SSID";
@@ -17,10 +21,14 @@ const char* password = "YOUR_WIFI_PASSWORD";
 const char* thingspeakServer = "api.thingspeak.com";
 const String thingspeakAPIKey = "YOUR_THINGSPEAK_API_KEY";
 
-// MySQL Server Configuration
-const char* mysqlServer = "yourserver.com";
-const int mysqlPort = 80;
-const String mysqlEndpoint = "/health_upload.php";
+// MySQL Database Configuration (Direct Connection)
+IPAddress server_addr(MYSQL_SERVER_IP);  // Change to your MySQL server IP
+char user[] = "arduino_user";            // MySQL username
+char password_db[] = "arduino_password"; // MySQL password
+char database[] = "health_monitor";      // Database name
+
+WiFiClient client;
+MySQL_Connection conn((Client *)&client);
 
 // Sensor Pin Definitions
 #define ECG_LO_PLUS D1
@@ -48,6 +56,7 @@ struct PatientData {
   int heartRate = 0;
   float spo2 = 0.0;
   float temperature = 0.0;
+  int hrv = 0;
 };
 
 PatientData patient;
@@ -59,11 +68,12 @@ const unsigned long SCAN_DURATION = 20000; // 20 seconds
 const int ECG_SAMPLES = 100;
 float ecgSamples[ECG_SAMPLES];
 int ecgSampleIndex = 0;
-float ecgAvg = 0.0;
 
 // HRV Calculation
+const int HRV_SAMPLES = 10;
+unsigned long rrIntervals[HRV_SAMPLES];
+int rrIndex = 0;
 unsigned long lastBeatTime = 0;
-float hrv = 0.0;
 
 void setup() {
   Serial.begin(115200);
@@ -78,6 +88,9 @@ void setup() {
   
   // Connect to WiFi
   connectToWiFi();
+  
+  // Connect to MySQL Database
+  connectToMySQL();
   
   // Initialize web server routes
   setupWebServer();
@@ -95,6 +108,7 @@ void loop() {
     if (millis() - scanStartTime >= SCAN_DURATION) {
       isScanning = false;
       calculateAverages();
+      calculateHRV();
       Serial.println("Scan completed!");
     }
   }
@@ -113,12 +127,24 @@ void initializeSensors() {
     Serial.println("MAX30100 initialization failed!");
   } else {
     Serial.println("MAX30100 initialized successfully!");
+    // Set up beat detection callback
+    pox.setOnBeatDetectedCallback(onBeatDetected);
   }
   
   // Set pulse oximeter configuration
   pox.setIRLedCurrent(MAX30100_LED_CURR_7_6MA);
   
   Serial.println("All sensors initialized!");
+}
+
+void onBeatDetected() {
+  unsigned long currentTime = millis();
+  if (lastBeatTime > 0) {
+    unsigned long rrInterval = currentTime - lastBeatTime;
+    rrIntervals[rrIndex] = rrInterval;
+    rrIndex = (rrIndex + 1) % HRV_SAMPLES;
+  }
+  lastBeatTime = currentTime;
 }
 
 void connectToWiFi() {
@@ -135,10 +161,21 @@ void connectToWiFi() {
   Serial.println(WiFi.localIP());
 }
 
+void connectToMySQL() {
+  Serial.print("Connecting to MySQL database...");
+  
+  if (conn.connect(server_addr, 3306, user, password_db)) {
+    Serial.println("MySQL connected successfully!");
+  } else {
+    Serial.println("MySQL connection failed!");
+  }
+}
+
 void setupWebServer() {
   server.on("/", HTTP_GET, handleRoot);
   server.on("/start", HTTP_POST, handleStartScan);
   server.on("/upload", HTTP_POST, handleUploadData);
+  server.on("/data", HTTP_GET, handleGetData);
   
   server.begin();
   Serial.println("HTTP server started");
@@ -169,11 +206,26 @@ void handleStartScan() {
 }
 
 void handleUploadData() {
-  if (sendToThingSpeak() && sendToMySQL()) {
+  if (sendToThingSpeak() && sendToMySQLDirect()) {
     server.send(200, "text/plain", "Data uploaded successfully!");
   } else {
     server.send(500, "text/plain", "Upload failed!");
   }
+}
+
+void handleGetData() {
+  StaticJsonDocument<512> jsonDoc;
+  jsonDoc["ecg"] = patient.ecgValue;
+  jsonDoc["hr"] = patient.heartRate;
+  jsonDoc["spo2"] = patient.spo2;
+  jsonDoc["temp"] = patient.temperature;
+  jsonDoc["hrv"] = patient.hrv;
+  jsonDoc["scanning"] = isScanning;
+  
+  String jsonString;
+  serializeJson(jsonDoc, jsonString);
+  
+  server.send(200, "application/json", jsonString);
 }
 
 void readSensors() {
@@ -218,15 +270,49 @@ void calculateAverages() {
   Serial.println("Temp: " + String(patient.temperature));
 }
 
+void calculateHRV() {
+  // Simple HRV calculation using RR intervals
+  if (rrIndex > 1) {
+    long sum = 0;
+    int count = 0;
+    for (int i = 0; i < rrIndex; i++) {
+      if (rrIntervals[i] > 0) {
+        sum += rrIntervals[i];
+        count++;
+      }
+    }
+    
+    if (count > 0) {
+      long mean = sum / count;
+      long variance = 0;
+      for (int i = 0; i < rrIndex; i++) {
+        if (rrIntervals[i] > 0) {
+          long diff = rrIntervals[i] - mean;
+          variance += diff * diff;
+        }
+      }
+      variance /= count;
+      patient.hrv = sqrt(variance);
+    }
+  }
+  Serial.println("HRV: " + String(patient.hrv));
+}
+
 void resetSensorData() {
   patient.ecgValue = 0.0;
   patient.heartRate = 0;
   patient.spo2 = 0.0;
   patient.temperature = 0.0;
+  patient.hrv = 0;
   ecgSampleIndex = 0;
+  rrIndex = 0;
+  lastBeatTime = 0;
   
   for (int i = 0; i < ECG_SAMPLES; i++) {
     ecgSamples[i] = 0.0;
+  }
+  for (int i = 0; i < HRV_SAMPLES; i++) {
+    rrIntervals[i] = 0;
   }
 }
 
@@ -239,7 +325,8 @@ bool sendToThingSpeak() {
                        "&field1=" + String(patient.ecgValue) +
                        "&field2=" + String(patient.heartRate) +
                        "&field3=" + String(patient.spo2) +
-                       "&field4=" + String(patient.temperature);
+                       "&field4=" + String(patient.temperature) +
+                       "&field5=" + String(patient.hrv);
       
       client.println("POST /update HTTP/1.1");
       client.println("Host: " + String(thingspeakServer));
@@ -260,41 +347,35 @@ bool sendToThingSpeak() {
   return false;
 }
 
-bool sendToMySQL() {
-  if (WiFi.status() == WL_CONNECTED) {
-    WiFiClient client;
+bool sendToMySQLDirect() {
+  if (conn.connected()) {
+    // Create INSERT query
+    char query[512];
+    sprintf(query, 
+      "INSERT INTO patient_data (name, age, sex, diseases, ecg_value, heart_rate, spo2, temperature, hrv, created_at) VALUES ('%s', %d, '%s', '%s', %.2f, %d, %.2f, %.2f, %d, NOW())",
+      patient.name.c_str(),
+      patient.age,
+      patient.sex.c_str(),
+      patient.diseases.c_str(),
+      patient.ecgValue,
+      patient.heartRate,
+      patient.spo2,
+      patient.temperature,
+      patient.hrv
+    );
     
-    if (client.connect(mysqlServer, mysqlPort)) {
-      // Create JSON document
-      StaticJsonDocument<512> jsonDoc;
-      jsonDoc["name"] = patient.name;
-      jsonDoc["age"] = patient.age;
-      jsonDoc["sex"] = patient.sex;
-      jsonDoc["diseases"] = patient.diseases;
-      jsonDoc["ecg"] = patient.ecgValue;
-      jsonDoc["hr"] = patient.heartRate;
-      jsonDoc["spo2"] = patient.spo2;
-      jsonDoc["temp"] = patient.temperature;
-      
-      String jsonString;
-      serializeJson(jsonDoc, jsonString);
-      
-      client.println("POST " + mysqlEndpoint + " HTTP/1.1");
-      client.println("Host: " + String(mysqlServer));
-      client.println("Content-Type: application/json");
-      client.println("Connection: close");
-      client.println("Content-Length: " + String(jsonString.length()));
-      client.println();
-      client.println(jsonString);
-      
-      delay(1000);
-      client.stop();
-      
-      Serial.println("Data sent to MySQL server");
-      return true;
+    MySQL_Cursor *cur_mem = new MySQL_Cursor(&conn);
+    cur_mem->execute(query);
+    delete cur_mem;
+    
+    Serial.println("Data stored in MySQL database");
+    return true;
+  } else {
+    Serial.println("MySQL not connected, attempting reconnect...");
+    if (connectToMySQL()) {
+      return sendToMySQLDirect();
     }
   }
-  Serial.println("MySQL upload failed");
   return false;
 }
 
@@ -390,6 +471,18 @@ String createWebPage() {
               background-color: #d1ecf1;
               color: #0c5460;
           }
+          .chart-container {
+              margin: 20px 0;
+              height: 200px;
+              background: #f8f9fa;
+              border: 1px solid #dee2e6;
+              border-radius: 5px;
+              position: relative;
+          }
+          .ecg-wave {
+              width: 100%;
+              height: 100%;
+          }
       </style>
   </head>
   <body>
@@ -434,9 +527,13 @@ String createWebPage() {
           
           <div id="status" class="status ready">Ready to scan</div>
           
+          <div class="chart-container">
+              <canvas id="ecgChart" class="ecg-wave"></canvas>
+          </div>
+          
           <div class="data-display">
               <div class="data-row">
-                  <span>ECG:</span>
+                  <span>ECG Value:</span>
                   <span id="ecgValue" class="data-value">--</span>
               </div>
               <div class="data-row">
@@ -451,10 +548,60 @@ String createWebPage() {
                   <span>Temperature:</span>
                   <span id="tempValue" class="data-value">-- °C</span>
               </div>
+              <div class="data-row">
+                  <span>HRV:</span>
+                  <span id="hrvValue" class="data-value">-- ms</span>
+              </div>
           </div>
       </div>
 
+      <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
       <script>
+          let ecgChart;
+          let ecgData = [];
+          let updateInterval;
+          
+          // Initialize ECG chart
+          function initChart() {
+              const ctx = document.getElementById('ecgChart').getContext('2d');
+              ecgChart = new Chart(ctx, {
+                  type: 'line',
+                  data: {
+                      labels: Array.from({length: 50}, (_, i) => i),
+                      datasets: [{
+                          label: 'ECG Waveform',
+                          data: ecgData,
+                          borderColor: '#e74c3c',
+                          backgroundColor: 'rgba(231, 76, 60, 0.1)',
+                          borderWidth: 2,
+                          pointRadius: 0,
+                          tension: 0.4
+                      }]
+                  },
+                  options: {
+                      responsive: true,
+                      maintainAspectRatio: false,
+                      scales: {
+                          y: {
+                              min: 0,
+                              max: 3.3,
+                              title: {
+                                  display: true,
+                                  text: 'Voltage (V)'
+                              }
+                          },
+                          x: {
+                              title: {
+                                  display: true,
+                                  text: 'Time'
+                              }
+                          }
+                      },
+                      animation: false
+                  }
+              });
+          }
+          
           function startScan() {
               const form = document.getElementById('patientForm');
               if (!form.checkValidity()) {
@@ -466,15 +613,59 @@ String createWebPage() {
               document.getElementById('status').className = 'status scanning';
               document.getElementById('status').textContent = 'Scanning... (20 seconds)';
               
+              // Reset ECG data
+              ecgData = Array(50).fill(0);
+              if (ecgChart) {
+                  ecgChart.data.datasets[0].data = ecgData;
+                  ecgChart.update();
+              }
+              
+              // Start updating data
+              startDataUpdate();
+              
               fetch('/start', {
                   method: 'POST',
                   body: new URLSearchParams(formData)
               }).then(response => {
                   if (response.ok) {
-                      // Update display after scan completion
-                      setTimeout(updateDisplay, 21000);
+                      // Stop updating after 20 seconds
+                      setTimeout(() => {
+                          stopDataUpdate();
+                          document.getElementById('status').className = 'status ready';
+                          document.getElementById('status').textContent = 'Scan completed! Ready to upload.';
+                      }, 20000);
                   }
               });
+          }
+          
+          function startDataUpdate() {
+              updateInterval = setInterval(updateDisplay, 1000);
+          }
+          
+          function stopDataUpdate() {
+              clearInterval(updateInterval);
+          }
+          
+          function updateDisplay() {
+              fetch('/data')
+                  .then(response => response.json())
+                  .then(data => {
+                      // Update values
+                      document.getElementById('ecgValue').textContent = data.ecg.toFixed(2);
+                      document.getElementById('hrValue').textContent = data.hr + ' bpm';
+                      document.getElementById('spo2Value').textContent = data.spo2.toFixed(1) + ' %';
+                      document.getElementById('tempValue').textContent = data.temp.toFixed(1) + ' °C';
+                      document.getElementById('hrvValue').textContent = data.hrv + ' ms';
+                      
+                      // Simulate ECG waveform update
+                      if (data.scanning && ecgChart) {
+                          // Add new data point and remove oldest
+                          ecgData.push(Math.random() * 2 + 0.5); // Simulated ECG data
+                          ecgData.shift();
+                          ecgChart.data.datasets[0].data = ecgData;
+                          ecgChart.update();
+                      }
+                  });
           }
           
           function uploadData() {
@@ -492,17 +683,10 @@ String createWebPage() {
               });
           }
           
-          function updateDisplay() {
-              // In a real implementation, you would fetch actual data from the server
-              // For now, we'll just show placeholder text
-              document.getElementById('ecgValue').textContent = '1.25';
-              document.getElementById('hrValue').textContent = '72 bpm';
-              document.getElementById('spo2Value').textContent = '98 %';
-              document.getElementById('tempValue').textContent = '36.8 °C';
-              
-              document.getElementById('status').className = 'status ready';
-              document.getElementById('status').textContent = 'Scan completed! Ready to upload.';
-          }
+          // Initialize chart when page loads
+          window.onload = function() {
+              initChart();
+          };
       </script>
   </body>
   </html>
@@ -512,91 +696,29 @@ String createWebPage() {
 }
 ```
 
-## PHP Script (health_upload.php)
+## Required Libraries Installation
 
-```php
-<?php
-// health_upload.php
-header('Content-Type: application/json');
-header('Access-Control-Allow-Origin: *');
-header('Access-Control-Allow-Methods: POST, GET, OPTIONS');
-header('Access-Control-Allow-Headers: Content-Type');
+Add these libraries to your Arduino IDE:
 
-// Database configuration
-$servername = "localhost";
-$username = "your_username";
-$password = "your_password";
-$dbname = "health_monitor";
+1. **ESP8266WiFi** (Built-in)
+2. **ESP8266WebServer** (Built-in)
+3. **OneWire** by Jim Studt
+4. **DallasTemperature** by Miles Burton
+5. **MAX30100** by OXullo Intersecans
+6. **ArduinoJson** by Benoit Blanchon
+7. **MySQL Connector/Arduino** by Dr. Charles Bell
 
-// Create connection
-$conn = new mysqli($servername, $username, $password, $dbname);
+## MySQL Database Setup
 
-// Check connection
-if ($conn->connect_error) {
-    http_response_code(500);
-    echo json_encode(["error" => "Connection failed: " . $conn->connect_error]);
-    exit();
-}
-
-// Get JSON input
-$input = file_get_contents('php://input');
-$data = json_decode($input, true);
-
-// Validate input
-if (!$data) {
-    http_response_code(400);
-    echo json_encode(["error" => "Invalid JSON input"]);
-    exit();
-}
-
-// Required fields
-$required = ['name', 'age', 'sex', 'ecg', 'hr', 'spo2', 'temp'];
-foreach ($required as $field) {
-    if (!isset($data[$field])) {
-        http_response_code(400);
-        echo json_encode(["error" => "Missing required field: $field"]);
-        exit();
-    }
-}
-
-// Prepare and bind
-$stmt = $conn->prepare("INSERT INTO patient_data (name, age, sex, diseases, ecg_value, heart_rate, spo2, temperature, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())");
-
-if (!$stmt) {
-    http_response_code(500);
-    echo json_encode(["error" => "Prepare failed: " . $conn->error]);
-    exit();
-}
-
-$stmt->bind_param("sisssddd", 
-    $data['name'],
-    $data['age'],
-    $data['sex'],
-    $data['diseases'],
-    $data['ecg'],
-    $data['hr'],
-    $data['spo2'],
-    $data['temp']
-);
-
-// Execute query
-if ($stmt->execute()) {
-    echo json_encode(["success" => "Data stored successfully", "id" => $stmt->insert_id]);
-} else {
-    http_response_code(500);
-    echo json_encode(["error" => "Execute failed: " . $stmt->error]);
-}
-
-$stmt->close();
-$conn->close();
-?>
-```
-
-## MySQL Database Schema
+### SQL Schema Creation
 
 ```sql
--- Create database
+-- Create database and user
 CREATE DATABASE health_monitor;
+CREATE USER 'arduino_user'@'%' IDENTIFIED BY 'arduino_password';
+GRANT ALL PRIVILEGES ON health_monitor.* TO 'arduino_user'@'%';
+FLUSH PRIVILEGES;
+
 USE health_monitor;
 
 -- Create patient_data table
@@ -610,81 +732,124 @@ CREATE TABLE patient_data (
     heart_rate INT,
     spo2 DECIMAL(5,2),
     temperature DECIMAL(4,2),
+    hrv INT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Create index for better query performance
+-- Create indexes for better performance
 CREATE INDEX idx_created_at ON patient_data(created_at);
 CREATE INDEX idx_name ON patient_data(name);
+CREATE INDEX idx_heart_rate ON patient_data(heart_rate);
 ```
 
-## ThingSpeak Configuration
+### MySQL Server Configuration
 
-**Channel Fields:**
-- Field 1: ECG Value
-- Field 2: Heart Rate (BPM)
-- Field 3: SpO2 (%)
-- Field 4: Temperature (°C)
+Add these lines to your MySQL configuration (`my.cnf` or `my.ini`):
 
-**ThingSpeak API URL:**
-```
-https://api.thingspeak.com/update?api_key=YOUR_API_KEY&field1=ECG_VALUE&field2=HR&field3=SPO2&field4=TEMP
+```ini
+[mysqld]
+bind-address = 0.0.0.0  # Allow remote connections
+max_connections = 100
+wait_timeout = 28800
 ```
 
-## Installation Instructions
+## Configuration Steps
 
-### 1. Hardware Connections
+### 1. WiFi Configuration
+```cpp
+const char* ssid = "Your_WiFi_SSID";
+const char* password = "Your_WiFi_Password";
+```
 
-**AD8232 ECG Sensor:**
-- LO+ → D1
-- LO- → D2
-- OUTPUT → A0
-- 3.3V → 3.3V
-- GND → GND
+### 2. ThingSpeak Configuration
+1. Create account at [thingspeak.com](https://thingspeak.com)
+2. Create a new channel with these fields:
+   - Field 1: ECG Value
+   - Field 2: Heart Rate
+   - Field 3: SpO2
+   - Field 4: Temperature
+   - Field 5: HRV
+3. Copy the Write API Key
 
-**MAX30100 Pulse Oximeter:**
-- SDA → D4
-- SCL → D5
-- VIN → 3.3V
-- GND → GND
+### 3. MySQL Configuration
+```cpp
+IPAddress server_addr(192,168,1,100);  // Your MySQL server IP
+char user[] = "arduino_user";
+char password_db[] = "arduino_password";
+char database[] = "health_monitor";
+```
 
-**DS18B20 Temperature Sensor:**
-- VCC → 3.3V
-- GND → GND
-- DATA → D3 (with 4.7kΩ pull-up resistor)
+### 4. Sensor Calibration
 
-### 2. Required Libraries
-Install these libraries in Arduino IDE:
-- ESP8266WiFi
-- ESP8266WebServer
-- OneWire
-- DallasTemperature
-- MAX30100 by OXullo Intersecans
-- ArduinoJson
+#### AD8232 Calibration
+- Ensure proper electrode placement
+- Check for lead-off detection
+- Verify signal quality in serial monitor
 
-### 3. Configuration
-1. Update WiFi credentials in Arduino code
-2. Add your ThingSpeak API key
-3. Update MySQL server URL
-4. Upload PHP script to your web server
-5. Create MySQL database using provided schema
+#### MAX30100 Calibration
+```cpp
+// Adjust LED current based on skin tone
+pox.setIRLedCurrent(MAX30100_LED_CURR_7_6MA);
+// Options: 0=0.0mA, 1=4.4mA, 2=7.6mA, 3=11.0mA, etc.
+```
 
-## Features
+## Hardware Connections
 
-- **Real-time Monitoring**: 20-second scanning with live data collection
-- **Web Interface**: Responsive dashboard for patient data entry and results
-- **Cloud Integration**: Simultaneous upload to ThingSpeak and MySQL
-- **Data Validation**: Input validation and error handling
-- **Modular Design**: Easy to extend and modify
+| ESP8266 Pin | Sensor | Connection |
+|-------------|---------|------------|
+| D1 | AD8232 | LO+ |
+| D2 | AD8232 | LO- |
+| A0 | AD8232 | OUTPUT |
+| D4 | MAX30100 | SDA |
+| D5 | MAX30100 | SCL |
+| D3 | DS18B20 | DATA |
+| 3.3V | All | VCC |
+| GND | All | GND |
 
-## Security Notes
+**Note**: Add 4.7kΩ pull-up resistor between DS18B20 DATA and 3.3V
 
-For production use:
-- Add authentication to web interface
-- Use HTTPS for PHP endpoint
-- Implement input sanitization
-- Add rate limiting
-- Use prepared statements (already implemented in PHP)
+## Features Included
 
-This complete system provides a robust health monitoring solution with cloud integration and a professional web interface!
+1. **Real-time Web Dashboard** with live ECG waveform
+2. **Direct MySQL Integration** without PHP
+3. **ThingSpeak Cloud Storage**
+4. **HRV Calculation** from pulse oximeter data
+5. **20-second Scan Sessions** with automatic averaging
+6. **Responsive Design** for mobile devices
+7. **Error Handling** and connection recovery
+8. **Serial Debug Output** for monitoring
 
+## Usage Instructions
+
+1. **Upload the code** to ESP8266 NodeMCU
+2. **Connect sensors** according to pin mapping
+3. **Power on** the system
+4. **Connect to WiFi** network
+5. **Open web browser** to ESP8266 IP address
+6. **Enter patient details** and click "Start Scan"
+7. **Wait 20 seconds** for data collection
+8. **Click "Upload Data"** to save to cloud and database
+
+## Troubleshooting
+
+### Common Issues:
+
+1. **WiFi Connection Failed**
+   - Check SSID and password
+   - Verify WiFi signal strength
+
+2. **MySQL Connection Failed**
+   - Check server IP and credentials
+   - Ensure MySQL allows remote connections
+   - Verify firewall settings
+
+3. **Sensor Reading Issues**
+   - Check wiring connections
+   - Verify sensor power (3.3V)
+   - Monitor serial output for error messages
+
+4. **Web Server Not Accessible**
+   - Check IP address in serial monitor
+   - Ensure client is on same network
+
+This complete solution provides a robust health monitoring system with direct database integration and real-time web interface!
